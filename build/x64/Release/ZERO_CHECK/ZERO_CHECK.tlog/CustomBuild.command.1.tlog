@@ -1,0 +1,10 @@
+^C:\RCP2\BUILD\CMAKEFILES\F00A74CEB74B1F5964BE8FFABE3F72B0\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/rcp2 -BC:/rcp2/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/rcp2/build/DICOMPrintSCP.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

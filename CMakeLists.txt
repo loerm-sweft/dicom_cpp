@@ -24,7 +24,8 @@ find_package(DCMTK REQUIRED CONFIG)
 add_executable(DICOMPrintSCP 
     src/main.cpp
 )
-
+ 
+ 
 # إعدادات الربط
 target_link_libraries(DICOMPrintSCP PRIVATE 
     DCMTK::dcmdata

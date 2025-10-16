@@ -1,6 +1,7 @@
 #include "PrintSCP.h"
 #include <chrono>
 #include <thread>
+//*kjfvzxclv
 
 PrintSCP::PrintSCP() : currentAssociation_(NULL) {
     std::cout << "🔄 تهيئة Print SCP..." << std::endl;

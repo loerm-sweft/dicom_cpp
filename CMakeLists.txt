@@ -23,7 +23,9 @@ find_package(DCMTK REQUIRED CONFIG)
 # إنشاء التنفيذي
 add_executable(DICOMPrintSCP 
     src/main.cpp
+    src/PrintSCP.cpp
 )
+
  
  
 # إعدادات الربط

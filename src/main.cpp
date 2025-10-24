@@ -11,6 +11,12 @@
 #include <dcmtk/dcmdata/dcdeftag.h>
 #include <dcmtk/dcmdata/dcuid.h>
 
+// إضافة دعم لفك ضغط الصور (JPEG / RLE)
+#include <dcmtk/dcmjpeg/djdecode.h>      // JPEG
+#include <dcmtk/dcmdata/dcrledrg.h>      // RLE
+// إذا تم بناء DCMTK مع دعم JPEG-LS
+// #include <dcmtk/dcmjpls/djdecode.h>
+
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "netapi32.lib")
 
@@ -28,6 +34,7 @@ const char* PRINT_SOP_CLASSES[] = {
     NULL
 };
 
+// Graceful shutdown handler
 BOOL WINAPI ConsoleHandler(DWORD signal) {
     if (signal == CTRL_C_EVENT) {
         std::cout << "\nReceived stop signal. Shutting down..." << std::endl;
@@ -73,8 +80,6 @@ OFCondition acceptPrintPresentationContexts(T_ASC_Parameters* params) {
                     std::cerr << "  -> Failed to accept: " << cond.text() << std::endl;
                 }
             } else {
-                // For non-print SOP classes, we can either reject or ignore
-                // In this case, we'll just not accept them (they will be rejected automatically)
                 std::cout << "  -> IGNORED (Not a Print SOP)" << std::endl;
             }
         }
@@ -93,17 +98,17 @@ void handleAssociation(T_ASC_Association* assoc) {
     T_ASC_PresentationContextID presID;
     OFCondition cond = EC_Normal;
     
-    // Handle incoming messages for a short time
-    for (int i = 0; i < 10; i++) { // Limit to 10 messages to prevent hanging
-        cond = DIMSE_receiveCommand(assoc, DIMSE_NONBLOCKING, 1, &presID, &msg, NULL);
+    // Handle incoming messages for a limited number of iterations
+    for (int i = 0; i < 20; i++) {
+        cond = DIMSE_receiveCommand(assoc, DIMSE_NONBLOCKING, 2, &presID, &msg, NULL);
         
         if (cond.good()) {
             switch (msg.CommandField) {
                 case DIMSE_N_CREATE_RQ:
-                    std::cout << "  Received N-CREATE" << std::endl;
-                    std::cout << "    SOP Class: " << msg.msg.NCreateRQ.AffectedSOPClassUID << std::endl;
-                    // Send success response
+                    std::cout << "🖨 Received N-CREATE" << std::endl;
+                    std::cout << "   SOP Class: " << msg.msg.NCreateRQ.AffectedSOPClassUID << std::endl;
                     {
+                        // إرسال استجابة نجاح
                         T_DIMSE_Message rsp;
                         memset(&rsp, 0, sizeof(rsp));
                         rsp.CommandField = DIMSE_N_CREATE_RSP;
@@ -113,24 +118,23 @@ void handleAssociation(T_ASC_Association* assoc) {
                         DIMSE_sendMessageUsingMemoryData(assoc, presID, &rsp, NULL, NULL, NULL, NULL);
                     }
                     break;
-                    
+
                 case DIMSE_N_ACTION_RQ:
-                    std::cout << "  Received N-ACTION" << std::endl;
-                    // Send success response
+                    std::cout << "⚡ Received N-ACTION" << std::endl;
                     {
                         T_DIMSE_Message rsp;
                         memset(&rsp, 0, sizeof(rsp));
                         rsp.CommandField = DIMSE_N_ACTION_RSP;
                         rsp.msg.NActionRSP.MessageIDBeingRespondedTo = msg.msg.NActionRQ.MessageID;
+                        rsp.msg.NActionRSP.ActionTypeID = msg.msg.NActionRQ.ActionTypeID;
                         rsp.msg.NActionRSP.DimseStatus = STATUS_Success;
                         rsp.msg.NActionRSP.DataSetType = DIMSE_DATASET_NULL;
                         DIMSE_sendMessageUsingMemoryData(assoc, presID, &rsp, NULL, NULL, NULL, NULL);
                     }
                     break;
-                    
+
                 case DIMSE_N_DELETE_RQ:
-                    std::cout << "  Received N-DELETE" << std::endl;
-                    // Send success response
+                    std::cout << "🗑 Received N-DELETE" << std::endl;
                     {
                         T_DIMSE_Message rsp;
                         memset(&rsp, 0, sizeof(rsp));
@@ -141,21 +145,23 @@ void handleAssociation(T_ASC_Association* assoc) {
                         DIMSE_sendMessageUsingMemoryData(assoc, presID, &rsp, NULL, NULL, NULL, NULL);
                     }
                     break;
-                    
+
                 default:
-                    if (msg.CommandField != 0) { // Ignore empty messages
-                        std::cout << "  Received DIMSE command: " << msg.CommandField << std::endl;
+                    if (msg.CommandField != 0) {
+                        std::cout << "Received unknown DIMSE command: " 
+                                  << msg.CommandField << std::endl;
                     }
                     break;
             }
         } else if (cond != DIMSE_NODATAAVAILABLE) {
-            break; // Break on real errors
+            std::cerr << "Error in DIMSE_receiveCommand: " << cond.text() << std::endl;
+            break;
         }
-        
-        Sleep(100); // Small delay between checks
+
+        Sleep(100); // Wait briefly before checking again
     }
     
-    std::cout << "Finished processing requests" << std::endl;
+    std::cout << "Finished processing requests." << std::endl;
 }
 
 int main() {
@@ -166,10 +172,15 @@ int main() {
 
     SetConsoleCtrlHandler(ConsoleHandler, TRUE);
 
+    // 🔹 Register DCMTK decoders for JPEG / RLE
+    DJDecoderRegistration::registerCodecs();
+    DcmRLEDecoderRegistration::registerCodecs();
+    // JPLDecoderRegistration::registerCodecs(); // Uncomment if available
+
     // Initialize Winsock
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        std::cerr << "Failed to initialize Winsock" << std::endl;
+        std::cerr << "❌ Failed to initialize Winsock" << std::endl;
         return 1;
     }
 
@@ -177,66 +188,69 @@ int main() {
     T_ASC_Network* network = NULL;
     OFCondition cond = ASC_initializeNetwork(NET_ACCEPTOR, PORT, 30, &network);
     if (cond.bad()) {
-        std::cerr << "Failed to initialize DCMTK network: " << cond.text() << std::endl;
+        std::cerr << "❌ Failed to initialize DCMTK network: " << cond.text() << std::endl;
         WSACleanup();
         return 1;
     }
 
-    std::cout << "Starting DICOM Print SCP..." << std::endl;
+    std::cout << "🚀 Starting DICOM Print SCP..." << std::endl;
     std::cout << "AE Title: " << AE_TITLE << std::endl;
     std::cout << "Port: " << PORT << std::endl;
-    std::cout << "Waiting for connections..." << std::endl;
+    std::cout << "Waiting for DICOM print connections..." << std::endl;
     std::cout << "==================================" << std::endl;
 
+    // Infinite loop to handle multiple clients
     while (true) {
         T_ASC_Association* assoc = NULL;
         
-        // Receive association
         cond = ASC_receiveAssociation(network, &assoc, ASC_DEFAULTMAXPDU);
-        
         if (cond.bad()) {
-            if (cond == DUL_PEERREQUESTEDRELEASE || cond == DUL_PEERABORTEDASSOCIATION) {
-                // Normal disconnection
+            if (cond == DUL_PEERREQUESTEDRELEASE || cond == DUL_PEERABORTEDASSOCIATION)
                 continue;
-            }
+            std::cerr << "❌ Association receive error: " << cond.text() << std::endl;
             continue;
         }
 
-        std::cout << "New connection from: " << assoc->params->DULparams.callingAPTitle << std::endl;
+        std::cout << "New connection from AE: " << assoc->params->DULparams.callingAPTitle << std::endl;
 
-        // Accept presentation contexts for print SOP classes
+        // Accept print-related SOPs
         cond = acceptPrintPresentationContexts(assoc->params);
         if (cond.bad()) {
-            std::cerr << "Failed to accept presentation contexts: " << cond.text() << std::endl;
+            std::cerr << "❌ Failed to accept presentation contexts: " << cond.text() << std::endl;
             ASC_dropAssociation(assoc);
             ASC_destroyAssociation(&assoc);
             continue;
         }
 
-        // Acknowledge association
         cond = ASC_acknowledgeAssociation(assoc);
         if (cond.bad()) {
-            std::cerr << "Failed to acknowledge association: " << cond.text() << std::endl;
+            std::cerr << "❌ Failed to acknowledge association: " << cond.text() << std::endl;
             ASC_dropAssociation(assoc);
             ASC_destroyAssociation(&assoc);
             continue;
         }
 
-        std::cout << "Association accepted successfully!" << std::endl;
+        std::cout << "✅ Association accepted successfully!" << std::endl;
 
-        // Handle the association
+        // Handle incoming print requests
         handleAssociation(assoc);
 
-        // Drop association
+        // Close connection
         ASC_dropAssociation(assoc);
         ASC_destroyAssociation(&assoc);
-        
-        std::cout << "Connection closed" << std::endl;
+
+        std::cout << "🔚 Connection closed." << std::endl;
         std::cout << "==================================" << std::endl;
-        std::cout << "Waiting for new connections..." << std::endl;
+        std::cout << "Waiting for next connection..." << std::endl;
     }
 
     ASC_dropNetwork(&network);
+
+    // Cleanup
+    DcmRLEDecoderRegistration::cleanup();
+    DJDecoderRegistration::cleanup();
+    // JPLDecoderRegistration::cleanup();
     WSACleanup();
+
     return 0;
 }

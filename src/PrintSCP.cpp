@@ -1,3 +1,4 @@
+// PrintSCP.cpp
 #include "PrintSCP.h"
 #include <chrono>
 #include <thread>
@@ -7,68 +8,7 @@
 #include <vector>
 #include <iostream>
 #include <mutex>
-
-// -----------------------------
-// دالة مساعدة لإرسال الصورة للطابعة
-// -----------------------------
-bool sendToPrinter(const Uint8* buffer, unsigned long width, unsigned long height, const std::string& printerName = "") {
-    HANDLE hPrinter;
-    if (!OpenPrinterA(printerName.empty() ? NULL : printerName.c_str(), &hPrinter, NULL)) {
-        std::cerr << "❌ فشل في فتح الطابعة" << std::endl;
-        return false;
-    }
-
-    DOC_INFO_1A docInfo;
-    docInfo.pDocName = (LPSTR)"DICOM Print";
-    docInfo.pOutputFile = NULL;
-    docInfo.pDatatype = (LPSTR)"RAW";
-
-    if (StartDocPrinterA(hPrinter, 1, (LPBYTE)&docInfo) == 0) {
-        std::cerr << "❌ فشل في بدء مستند الطباعة" << std::endl;
-        ClosePrinter(hPrinter);
-        return false;
-    }
-
-    if (!StartPagePrinter(hPrinter)) {
-        std::cerr << "❌ فشل في بدء الصفحة" << std::endl;
-        EndDocPrinter(hPrinter);
-        ClosePrinter(hPrinter);
-        return false;
-    }
-
-    BITMAPINFO bmi = {};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = width;
-    bmi.bmiHeader.biHeight = -(LONG)height; // top-down
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 8;
-    bmi.bmiHeader.biCompression = BI_RGB;
-    for (int i = 0; i < 256; ++i) {
-        bmi.bmiColors[i].rgbBlue = i;
-        bmi.bmiColors[i].rgbGreen = i;
-        bmi.bmiColors[i].rgbRed = i;
-        bmi.bmiColors[i].rgbReserved = 0;
-    }
-
-    HDC hDC = CreateDCA("WINSPOOL", printerName.empty() ? NULL : printerName.c_str(), NULL, NULL);
-    if (!hDC) {
-        std::cerr << "❌ فشل في إنشاء DC للطابعة" << std::endl;
-        EndPagePrinter(hPrinter);
-        EndDocPrinter(hPrinter);
-        ClosePrinter(hPrinter);
-        return false;
-    }
-
-    StretchDIBits(hDC, 0, 0, width, height, 0, 0, width, height, buffer, &bmi, DIB_RGB_COLORS, SRCCOPY);
-
-    DeleteDC(hDC);
-    EndPagePrinter(hPrinter);
-    EndDocPrinter(hPrinter);
-    ClosePrinter(hPrinter);
-
-    std::cout << "✅ تم إرسال الصورة للطباعة بنجاح" << std::endl;
-    return true;
-}
+#include <cstring>
 
 // -----------------------------
 // PrintSCP Implementation
@@ -81,6 +21,161 @@ PrintSCP::~PrintSCP() {
     std::cout << "🧹 تنظيف Print SCP..." << std::endl;
 }
 
+/**
+ * @brief Helper: send image buffer to Windows printer. Supports 8-bit grayscale and 24-bit RGB.
+ * bitsPerPixel: 8 or 24
+ */
+bool PrintSCP::sendToPrinter(const Uint8* buffer,
+                             unsigned long width,
+                             unsigned long height,
+                             const std::string& printerName,
+                             int bitsPerPixel) {
+    // Open target printer (NULL = default)
+    HANDLE hPrinter = NULL;
+    if (!OpenPrinterA(printerName.empty() ? NULL : printerName.c_str(), &hPrinter, NULL)) {
+        std::cerr << "❌ Failed to open printer: " << printerName << " (using default?)" << std::endl;
+        return false;
+    }
+
+    DOC_INFO_1A docInfo;
+    ZeroMemory(&docInfo, sizeof(docInfo));
+    docInfo.pDocName = (LPSTR)"DICOM Print";
+    docInfo.pOutputFile = NULL;
+    docInfo.pDatatype = (LPSTR)"RAW";
+
+    if (StartDocPrinterA(hPrinter, 1, (LPBYTE)&docInfo) == 0) {
+        std::cerr << "❌ Failed to start print doc" << std::endl;
+        ClosePrinter(hPrinter);
+        return false;
+    }
+
+    if (!StartPagePrinter(hPrinter)) {
+        std::cerr << "❌ Failed to start page" << std::endl;
+        EndDocPrinter(hPrinter);
+        ClosePrinter(hPrinter);
+        return false;
+    }
+
+    // Create device context for the printer
+    HDC hDC = CreateDCA("WINSPOOL", printerName.empty() ? NULL : printerName.c_str(), NULL, NULL);
+    if (!hDC) {
+        std::cerr << "❌ Failed to create printer DC" << std::endl;
+        EndPagePrinter(hPrinter);
+        EndDocPrinter(hPrinter);
+        ClosePrinter(hPrinter);
+        return false;
+    }
+
+    BOOL result = FALSE;
+
+    if (bitsPerPixel == 8) {
+        // 8-bit grayscale: need BITMAPINFO with palette (256 entries)
+        size_t bmiSize = sizeof(BITMAPINFOHEADER) + 256 * sizeof(RGBQUAD);
+        BITMAPINFO* pbmi = (BITMAPINFO*)malloc(bmiSize);
+        if (!pbmi) {
+            std::cerr << "❌ Memory allocation failed for BITMAPINFO (8-bit)" << std::endl;
+            DeleteDC(hDC);
+            EndPagePrinter(hPrinter);
+            EndDocPrinter(hPrinter);
+            ClosePrinter(hPrinter);
+            return false;
+        }
+        ZeroMemory(pbmi, bmiSize);
+        pbmi->bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        pbmi->bmiHeader.biWidth = (LONG)width;
+        pbmi->bmiHeader.biHeight = -(LONG)height; // top-down
+        pbmi->bmiHeader.biPlanes = 1;
+        pbmi->bmiHeader.biBitCount = 8;
+        pbmi->bmiHeader.biCompression = BI_RGB;
+        pbmi->bmiHeader.biSizeImage = 0;
+
+        for (int i = 0; i < 256; ++i) {
+            pbmi->bmiColors[i].rgbBlue = (BYTE)i;
+            pbmi->bmiColors[i].rgbGreen = (BYTE)i;
+            pbmi->bmiColors[i].rgbRed = (BYTE)i;
+            pbmi->bmiColors[i].rgbReserved = 0;
+        }
+
+        // StretchDIBits - it accepts 8-bit buffer with palette
+        int ret = StretchDIBits(hDC,
+                                0, 0, (int)width, (int)height,
+                                0, 0, (int)width, (int)height,
+                                buffer,
+                                pbmi,
+                                DIB_RGB_COLORS,
+                                SRCCOPY);
+        if (ret == GDI_ERROR) {
+            std::cerr << "❌ StretchDIBits failed for 8-bit image" << std::endl;
+            result = FALSE;
+        } else {
+            result = TRUE;
+        }
+        free(pbmi);
+    } else if (bitsPerPixel == 24) {
+        // 24-bit RGB: Windows expects BGR and each scanline padded to 4 bytes
+        const int bytesPerPixel = 3;
+        int srcStride = (int)(width * bytesPerPixel);
+        int dstStride = ((srcStride + 3) / 4) * 4; // padded to 4 bytes
+        size_t paddedSize = (size_t)dstStride * height;
+
+        std::vector<BYTE> paddedBuffer(paddedSize);
+        // Fill paddedBuffer row by row (Windows uses bottom-up unless height negative; we used top-down by negative height in header, so keep order top-down)
+        for (unsigned long y = 0; y < height; ++y) {
+            const Uint8* srcRow = buffer + (y * srcStride);
+            BYTE* dstRow = paddedBuffer.data() + (y * dstStride);
+            // Copy and swap R<->B to make BGR
+            for (unsigned long x = 0; x < width; ++x) {
+                // src: R G B  -> dst: B G R
+                dstRow[x * 3 + 0] = srcRow[x * 3 + 2];
+                dstRow[x * 3 + 1] = srcRow[x * 3 + 1];
+                dstRow[x * 3 + 2] = srcRow[x * 3 + 0];
+            }
+            // remaining padding bytes are already zero-initialized by vector
+        }
+
+        BITMAPINFOHEADER bih;
+        ZeroMemory(&bih, sizeof(bih));
+        bih.biSize = sizeof(BITMAPINFOHEADER);
+        bih.biWidth = (LONG)width;
+        bih.biHeight = -(LONG)height; // top-down
+        bih.biPlanes = 1;
+        bih.biBitCount = 24;
+        bih.biCompression = BI_RGB;
+        bih.biSizeImage = (DWORD)paddedSize;
+
+        // StretchDIBits expects a BITMAPINFO pointer; we can pass pointer to header
+        int ret = StretchDIBits(hDC,
+                                0, 0, (int)width, (int)height,
+                                0, 0, (int)width, (int)height,
+                                paddedBuffer.data(),
+                                (BITMAPINFO*)&bih,
+                                DIB_RGB_COLORS,
+                                SRCCOPY);
+        if (ret == GDI_ERROR) {
+            std::cerr << "❌ StretchDIBits failed for 24-bit image" << std::endl;
+            result = FALSE;
+        } else {
+            result = TRUE;
+        }
+    } else {
+        std::cerr << "❌ Unsupported bitsPerPixel: " << bitsPerPixel << std::endl;
+        result = FALSE;
+    }
+
+    // Cleanup GDI and printer
+    DeleteDC(hDC);
+    EndPagePrinter(hPrinter);
+    EndDocPrinter(hPrinter);
+    ClosePrinter(hPrinter);
+
+    if (result)
+        std::cout << "✅ Image successfully sent to printer" << std::endl;
+    return result != FALSE;
+}
+
+// -----------------------------
+// handleAssociation
+// -----------------------------
 OFCondition PrintSCP::handleAssociation(T_ASC_Association* assoc) {
     currentAssociation_ = assoc;
     OFCondition cond = EC_Normal;
@@ -133,29 +228,68 @@ OFCondition PrintSCP::handleNCreateRequest(const T_DIMSE_N_CreateRQ& req,
         return sendNCreateResponse(req, presID, STATUS_ProcessingFailure);
     }
 
-    // تحويل الصورة للطباعة
+    // التشخيص: Transfer Syntax ووجود PixelData
+    OFString txUID;
+    dataset->findAndGetOFString(DCM_TransferSyntaxUID, txUID);
+    std::cout << "Transfer Syntax UID (dataset): " << txUID << std::endl;
+
+    DcmElement* pixElem = nullptr;
+    if (dataset->findAndGetElement(DCM_PixelData, pixElem) == EC_Normal) {
+        std::cout << "PixelData: present" << std::endl;
+    } else {
+        std::cout << "PixelData: NOT found" << std::endl;
+    }
+
+    // Use DicomImage to convert to displayable 8-bit (or 24-bit for color)
     DicomImage dcmImage(dataset, EXS_Unknown);
     if (dcmImage.getStatus() != EIS_Normal) {
-        std::cerr << "❌ خطأ في قراءة DICOM Image" << std::endl;
+        std::cerr << "❌ Error reading DICOM Image (status=" << dcmImage.getStatus() << ")\n";
         delete dataset;
         return sendNCreateResponse(req, presID, STATUS_CannotUnderstand);
     }
 
-    dcmImage.setMinMaxWindow();
+    dcmImage.setMinMaxWindow(); // apply automatic windowing
+
     const unsigned long width = dcmImage.getWidth();
     const unsigned long height = dcmImage.getHeight();
-    std::vector<Uint8> buffer(width * height);
 
-    if (dcmImage.isMonochrome()) {
-        for (unsigned long y = 0; y < height; ++y)
-            for (unsigned long x = 0; x < width; ++x)
-                buffer[y * width + x] = static_cast<Uint8>(dcmImage.getPixel(x, y));
-
-        if (dcmImage.getPhotometricInterpretation() == EPI_Monochrome1)
-            for (auto& val : buffer) val = 255 - val;
+    const void* outData = dcmImage.getOutputData(8); // request 8-bit output; color images will be 3 bytes per pixel
+    if (!outData) {
+        std::cerr << "❌ getOutputData returned NULL" << std::endl;
+        delete dataset;
+        return sendNCreateResponse(req, presID, STATUS_ProcessingFailure);
     }
 
-    sendToPrinter(buffer.data(), width, height);
+    // If monochrome, outData length = width*height (1 byte per pixel)
+    // If color, outData length = width*height*3 (RGB)
+    if (dcmImage.isMonochrome()) {
+        std::vector<Uint8> buffer(width * height);
+        memcpy(buffer.data(), outData, width * height);
+
+        // MONOCHROME1 needs inversion
+        if (dcmImage.getPhotometricInterpretation() == EPI_Monochrome1) {
+            for (size_t i = 0; i < buffer.size(); ++i) buffer[i] = 255 - buffer[i];
+        }
+
+        // Send to printer as 8-bit grayscale
+        if (!sendToPrinter(buffer.data(), width, height, std::string(), 8)) {
+            std::cerr << "❌ sendToPrinter failed for monochrome image" << std::endl;
+            delete dataset;
+            return sendNCreateResponse(req, presID, STATUS_ProcessingFailure);
+        }
+    } else {
+        // Color image - assume RGB interleaved (R G B)
+        const size_t rgbSize = (size_t)width * (size_t)height * 3;
+        std::vector<Uint8> rgbBuffer(rgbSize);
+        memcpy(rgbBuffer.data(), outData, rgbSize);
+
+        // sendToPrinter expects BGR; the function will swap bytes
+        if (!sendToPrinter(rgbBuffer.data(), width, height, std::string(), 24)) {
+            std::cerr << "❌ sendToPrinter failed for color image" << std::endl;
+            delete dataset;
+            return sendNCreateResponse(req, presID, STATUS_ProcessingFailure);
+        }
+    }
 
     delete dataset;
     return sendNCreateResponse(req, presID, STATUS_Success);
@@ -176,6 +310,7 @@ OFCondition PrintSCP::handleNActionRequest(const T_DIMSE_N_ActionRQ& req,
         return EC_IllegalParameter;
     }
 
+    // معالجة مشابهة لـ N-CREATE: تحويل الصورة وإرسالها
     DicomImage dcmImage(dataset, EXS_Unknown);
     if (dcmImage.getStatus() != EIS_Normal) {
         std::cerr << "❌ خطأ في قراءة DICOM Image" << std::endl;
@@ -186,18 +321,37 @@ OFCondition PrintSCP::handleNActionRequest(const T_DIMSE_N_ActionRQ& req,
     dcmImage.setMinMaxWindow();
     const unsigned long width = dcmImage.getWidth();
     const unsigned long height = dcmImage.getHeight();
-    std::vector<Uint8> buffer(width * height);
 
-    if (dcmImage.isMonochrome()) {
-        for (unsigned long y = 0; y < height; ++y)
-            for (unsigned long x = 0; x < width; ++x)
-                buffer[y * width + x] = static_cast<Uint8>(dcmImage.getPixel(x, y));
-
-        if (dcmImage.getPhotometricInterpretation() == EPI_Monochrome1)
-            for (auto& val : buffer) val = 255 - val;
+    const void* outData = dcmImage.getOutputData(8);
+    if (!outData) {
+        std::cerr << "❌ getOutputData returned NULL in N-ACTION" << std::endl;
+        delete dataset;
+        return EC_CorruptedData;
     }
 
-    sendToPrinter(buffer.data(), width, height);
+    if (dcmImage.isMonochrome()) {
+        std::vector<Uint8> buffer(width * height);
+        memcpy(buffer.data(), outData, width * height);
+        if (dcmImage.getPhotometricInterpretation() == EPI_Monochrome1)
+            for (size_t i = 0; i < buffer.size(); ++i) buffer[i] = 255 - buffer[i];
+
+        if (!sendToPrinter(buffer.data(), width, height, std::string(), 8)) {
+            std::cerr << "❌ sendToPrinter failed (N-ACTION, mono)" << std::endl;
+            delete dataset;
+            return EC_CorruptedData;
+        }
+    } else {
+        const size_t rgbSize = (size_t)width * (size_t)height * 3;
+        std::vector<Uint8> rgbBuffer(rgbSize);
+        memcpy(rgbBuffer.data(), outData, rgbSize);
+
+        if (!sendToPrinter(rgbBuffer.data(), width, height, std::string(), 24)) {
+            std::cerr << "❌ sendToPrinter failed (N-ACTION, color)" << std::endl;
+            delete dataset;
+            return EC_CorruptedData;
+        }
+    }
+
     delete dataset;
 
     // إرسال الرد
@@ -242,7 +396,7 @@ OFCondition PrintSCP::sendNCreateResponse(const T_DIMSE_N_CreateRQ& req,
     response.msg.NCreateRSP.DimseStatus = status;
     response.msg.NCreateRSP.DataSetType = DIMSE_DATASET_NULL;
 
-    // Dataset اختياري للرد
+    // Optional dataset in response
     DcmDataset* rspDataset = nullptr;
     if (status == STATUS_Success) {
         rspDataset = new DcmDataset();
@@ -290,4 +444,3 @@ OFCondition PrintSCP::handlePrinterCreate() {
     std::cout << "🖨 معالجة إنشاء طابعة" << std::endl;
     return EC_Normal;
 }
-
